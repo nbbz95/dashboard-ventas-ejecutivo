@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard ejecutivo de ventas</title>
+<meta name="description" content="Tablero ejecutivo de ventas de un e-commerce: facturación, órdenes, ticket, puntualidad y satisfacción, con filtros por período, región y categoría.">
+<link rel="stylesheet" href="assets/ui.css">
+<style>
+  .filters { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); padding: 10px 0; margin: -10px 0 10px; }
+  .chip-clear { display: none; }
+  .chip-clear.show { display: inline-flex; }
+  .compare { font-size: 12px; color: var(--muted); }
+  .kpi .delta svg { width: 10px; height: 10px; vertical-align: -1px; margin-right: 2px; }
+  .kpi .value { font-variant-numeric: tabular-nums; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .bars-click .hit { cursor: pointer; }
+  @media (max-width: 900px) { #kpis .kpi { grid-column: span 6; } }
+  @media (max-width: 700px) { .filters { position: static; } #kpis .kpi { padding: 14px; } #kpis .kpi .value { font-size: 22px; } #kpis .kpi .delta span { display: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">Ventas · Tablero ejecutivo</div>
+      <h1>¿Cómo vienen las ventas?</h1>
+      <p>Marketplace Olist (Brasil). Los indicadores que mira una gerencia comercial, con comparación contra el período anterior.</p>
+    </div>
+    <button class="btn" id="theme" type="button">Auto</button>
+  </header>
+
+  <div class="filters">
+    <div class="controls" style="margin:0">
+      <div class="seg" id="periodos" role="group" aria-label="Período"></div>
+      <label>Región <select id="region"><option value="">Todas</option></select></label>
+      <label>Categoría <select id="categoria"><option value="">Todas</option></select></label>
+      <button class="btn chip-clear" id="clear" type="button">Limpiar filtros</button>
+      <span class="compare" id="compare"></span>
+    </div>
+  </div>
+
+  <section class="grid swap" id="kpis"></section>
+
+  <section class="grid" style="margin-top:16px">
+    <div class="card span-8 reveal">
+      <h2>Facturación mensual</h2>
+      <p class="sub" id="trend-sub">BRL, órdenes entregadas.</p>
+      <div id="trend"></div>
+    </div>
+    <div class="card span-4 reveal">
+      <h2>Entregas fuera de plazo</h2>
+      <p class="sub">Por mes, en el período elegido.</p>
+      <div id="late"></div>
+      <p class="hint" style="margin-top:8px">% de órdenes entregadas después de la fecha prometida.</p>
+    </div>
+    <div class="card span-6 reveal bars-click">
+      <div class="card-head"><div><h2>Facturación por categoría</h2><p class="sub">Top 10 sin "otras". Tocá una barra para filtrar.</p></div></div>
+      <div id="cats"></div>
+    </div>
+    <div class="card span-6 reveal">
+      <h2>Facturación por estado</h2>
+      <p class="sub">Top 10 del período.</p>
+      <div id="states"></div>
+    </div>
+    <div class="card span-12 reveal">
+      <h2>Detalle por categoría</h2>
+      <p class="sub" id="table-sub"></p>
+      <div id="table"></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    Datos: <a href="https://github.com/olist/work-at-olist-data">Olist, Brazilian E-Commerce Public Dataset</a>, órdenes entregadas ene 2017 - ago 2018.
+    El cubo se arma con SQL en DuckDB (<a href="https://github.com/nbbz95/dashboard-ventas-ejecutivo/blob/main/src/cubo.sql">cubo.sql</a>).
+  </footer>
+</div>
+
+<script src="assets/charts.js"></script>
+<script src="assets/cubo.js"></script>
+<script>
+const brl = (v) => "R$ " + Math.round(v).toLocaleString("es-AR");
+const brlC = (v) => Math.abs(v) >= 1e6 ? "R$ " + (v / 1e6).toLocaleString("es-AR", { maximumFractionDigits: 2 }) + " M" : Math.abs(v) >= 1e3 ? "R$ " + Math.round(v / 1e3).toLocaleString("es-AR") + " k" : brl(v);
+const num = (v) => Math.round(v).toLocaleString("es-AR");
+const pct = (v, d = 1) => v == null ? "n/a" : (v * 100).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }) + "%";
+const MES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const mes = (s) => MES[+s.slice(5) - 1] + " " + s.slice(2, 4);
+const cat = (s) => s === "other" ? "otras" : s.replaceAll("_", " ");
+const UP = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 6H1z" fill="currentColor"/></svg>';
+const DOWN = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 9L1 3h8z" fill="currentColor"/></svg>';
+
+let CUBO, PERIODOS, state = { periodo: "ytd", region: "", categoria: "" };
+const charts = {};
+
+function delta(v, goodWhenUp = true, points = false) {
+  if (v == null) return `<div class="delta">sin comparación</div>`;
+  const good = goodWhenUp ? v >= 0 : v <= 0;
+  const txt = points ? (v >= 0 ? "+" : "−") + Math.abs(v * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 }) + " pp"
+    : (v >= 0 ? "+" : "−") + Math.abs(v * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 }) + "%";
+  return `<div class="delta ${good ? "up" : "down"}">${v >= 0 ? UP : DOWN}${txt} <span style="color:var(--muted)">vs ${PERIODOS.find((p) => p.id === state.periodo).compNombre}</span></div>`;
+}
+
+function render() {
+  const p = PERIODOS.find((x) => x.id === state.periodo);
+  const estados = state.region ? CUBO.regiones[state.region] : null;
+  const categoria = state.categoria === "" ? null : +state.categoria;
+  const filas = Cubo.filtrar(CUBO, { rango: p.rango, estados, categoria });
+  const k = Cubo.kpis(filas);
+  const prev = p.comp ? Cubo.kpis(Cubo.filtrar(CUBO, { rango: p.comp, estados, categoria })) : null;
+  const v = (key) => (prev ? Cubo.variacion(k[key], prev[key]) : null);
+  const d = (key) => (prev && k[key] != null && prev[key] != null ? k[key] - prev[key] : null);
+
+  document.getElementById("compare").textContent = p.comp ? `Comparando contra ${p.compNombre}` : "";
+  document.getElementById("clear").classList.toggle("show", !!(state.region || state.categoria));
+
+  const kp = document.getElementById("kpis");
+  kp.classList.add("is-updating");
+  requestAnimationFrame(() => {
+    kp.innerHTML = [
+      ["Facturación", brlC(k.facturacion), delta(v("facturacion"))],
+      ["Órdenes", num(k.ordenes), delta(v("ordenes"))],
+      ["Ticket promedio", k.ticket ? brl(k.ticket) : "n/a", delta(v("ticket"))],
+      ["Entregas tarde", pct(k.tardePct), delta(d("tardePct"), false, true)],
+      ["Nota de reseñas", k.nota ? k.nota.toLocaleString("es-AR", { maximumFractionDigits: 2 }) + " / 5" : "n/a", prev && k.nota && prev.nota ? delta((k.nota - prev.nota) / 100, true, true).replace(/ pp/, " pts") : delta(null)],
+      ["Flete sobre facturación", pct(k.fletePct), delta(d("fletePct"), false, true)],
+    ].map(([l, val, dl]) => `<div class="card kpi span-4"><div class="label">${l}</div><div class="value">${val}</div>${dl}</div>`).join("");
+    kp.classList.remove("is-updating");
+  });
+
+  // Tendencia: siempre todo el histórico, con el período actual resaltado vía serie separada.
+  const all = Cubo.serieMensual(CUBO, Cubo.filtrar(CUBO, { rango: [0, CUBO.meses.length - 1], estados, categoria }), [0, CUBO.meses.length - 1]);
+  const inP = (i) => i >= p.rango[0] && i <= p.rango[1];
+  document.getElementById("trend-sub").textContent = `BRL, órdenes entregadas. En azul, ${p.nombre.toLowerCase()}.`;
+  charts.trend = Charts.columns("#trend", {
+    labels: all.map((x) => mes(x.mes)), values: all.map((x) => x.facturacion), fmt: brlC, valueName: "Facturación",
+    colorFor: (_, i) => (inP(i) ? Charts.css("--s1") : Charts.css("--grid")), height: 240,
+  });
+
+  const serie = Cubo.serieMensual(CUBO, filas, p.rango);
+  charts.late = Charts.line("#late", {
+    labels: serie.map((x) => mes(x.mes)), series: [{ name: "Entregas tarde", values: serie.map((x) => x.tardePct), slot: 1 }],
+    fmt: (x) => pct(x), tickFmt: (x) => pct(x, 0), height: 200,
+  });
+
+  const cats = Cubo.porDimension(Cubo.filtrar(CUBO, { rango: p.rango, estados }), 2, CUBO.categorias);
+  const chart = document.getElementById("cats");
+  charts.cats = Charts.bars(chart, {
+    items: cats.filter((c) => c.clave !== "other").slice(0, 10).map((c) => ({ label: cat(c.clave), value: c.facturacion, indice: c.indice, color: categoria == null || categoria === c.indice ? Charts.css("--s1") : Charts.css("--grid"), note: `${num(c.ordenes)} órdenes · ticket ${brl(c.ticket)}` })),
+    fmt: brlC, valueName: "Facturación", labelWidth: 160,
+    onClick: (dd) => { state.categoria = state.categoria === String(dd.indice) ? "" : String(dd.indice); sync(); },
+  });
+
+  const st = Cubo.porDimension(Cubo.filtrar(CUBO, { rango: p.rango, estados, categoria }), 1, CUBO.estados);
+  charts.states = Charts.bars("#states", {
+    items: st.slice(0, 10).map((s) => ({ label: s.clave, value: s.facturacion, note: `${num(s.ordenes)} órdenes · ${pct(s.tardePct)} tarde` })),
+    fmt: brlC, valueName: "Facturación", labelWidth: 60, slot: 2,
+  });
+
+  const prevCats = p.comp ? new Map(Cubo.porDimension(Cubo.filtrar(CUBO, { rango: p.comp, estados }), 2, CUBO.categorias).map((c) => [c.clave, c])) : null;
+  document.getElementById("table-sub").textContent = p.comp ? `Crecimiento contra ${p.compNombre}.` : "Sin período de comparación.";
+  Charts.table("#table", ["Categoría", "Facturación", "Crec.", "Órdenes", "Ticket", "Tarde", "Nota"],
+    cats.map((c) => {
+      const g = prevCats && prevCats.get(c.clave) ? Cubo.variacion(c.facturacion, prevCats.get(c.clave).facturacion) : null;
+      return [cat(c.clave), brlC(c.facturacion), g == null ? "n/a" : `<span style="color:var(${g >= 0 ? "--up" : "--down"})">${g >= 0 ? "+" : "−"}${Math.abs(g * 100).toFixed(0)}%</span>`,
+        num(c.ordenes), brl(c.ticket), pct(c.tardePct), c.nota ? c.nota.toFixed(2).replace(".", ",") : "n/a"];
+    }));
+}
+
+function sync() {
+  document.querySelectorAll("#periodos .btn").forEach((b) => b.setAttribute("aria-pressed", b.dataset.p === state.periodo));
+  document.getElementById("region").value = state.region;
+  document.getElementById("categoria").value = state.categoria;
+  try { history.replaceState(null, "", "#" + new URLSearchParams(state).toString()); } catch (e) {}
+  render();
+}
+
+fetch("cubo.json").then((r) => r.json()).then((c) => {
+  CUBO = c;
+  PERIODOS = Cubo.periodos(c.meses);
+  const fromHash = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+  state = { ...state, ...fromHash };
+  if (!PERIODOS.some((p) => p.id === state.periodo)) state.periodo = "ytd";
+  document.getElementById("periodos").innerHTML = PERIODOS.map((p) => `<button class="btn" type="button" data-p="${p.id}">${p.nombre}</button>`).join("");
+  document.getElementById("periodos").addEventListener("click", (e) => { const b = e.target.closest("[data-p]"); if (b) { state.periodo = b.dataset.p; sync(); } });
+  const reg = document.getElementById("region");
+  reg.insertAdjacentHTML("beforeend", Object.keys(c.regiones).map((r) => `<option>${r}</option>`).join(""));
+  reg.addEventListener("change", () => { state.region = reg.value; sync(); });
+  const ct = document.getElementById("categoria");
+  ct.insertAdjacentHTML("beforeend", c.categorias.map((x, i) => `<option value="${i}">${cat(x)}</option>`).join(""));
+  ct.addEventListener("change", () => { state.categoria = ct.value; sync(); });
+  document.getElementById("clear").addEventListener("click", () => { state.region = ""; state.categoria = ""; sync(); });
+  sync();
+  Charts.themeToggle(document.getElementById("theme"), render, { system: "Auto", light: "Claro", dark: "Oscuro", prefix: "Tema" });
+});
+</script>
+</body>
+</html>

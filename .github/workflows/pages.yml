@@ -1,0 +1,38 @@
+name: CI y GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install -r requirements.txt
+      - name: Descargar datos de Olist
+        run: ./scripts/descargar_datos.sh
+      - name: Cubo
+        run: python src/build.py
+      - name: Tests (Python y JavaScript)
+        run: |
+          python -m pytest -q
+          node --test tests/*.test.mjs
+      - name: Deploy a gh-pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
